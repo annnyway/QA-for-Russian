@@ -9,9 +9,10 @@
 
 import torch
 from pytorch_pretrained_bert import BertTokenizer, BertConfig, BertForMaskedLM
+from tqdm.auto import tqdm
 
 
-def get_embeddings(x_data_instance:list):
+def get_embeddings(x_data_instance:list, model):
     indexed_tokens = x_data_instance
     tokens_tensor = torch.tensor([indexed_tokens])
     segments_ids = [1] * len(indexed_tokens)
@@ -33,18 +34,19 @@ def get_embeddings(x_data_instance:list):
 
 def embed_data(x_data): 
     
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     output_model_file = "lm/pytorch_model.bin"
     output_config_file = "lm/config.json"
     tokenizer = BertTokenizer.from_pretrained("lm", do_lower_case=False)
     config = BertConfig.from_json_file(output_config_file)
     model = BertForMaskedLM(config)
-    state_dict = torch.load(output_model_file, map_location=torch.device('cpu'))
+    state_dict = torch.load(output_model_file, map_location=device)
     model.load_state_dict(state_dict)
     
     entries = [] 
     data_iterator = tqdm(x_data, desc='Loading embeddings')
     
     for entry in data_iterator:
-        entries.append(get_embeddings(entry))
+        entries.append(get_embeddings(entry, model))
         
-    return entries  
+    return entries, model  
