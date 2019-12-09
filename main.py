@@ -39,13 +39,13 @@ class QADataset(Dataset):
     def load_x_y(self, paragraphs, questions, spans, verbose=True):
         for par, quest, span in tqdm(zip(paragraphs, questions, spans),
                                      desc="Loading data", disable=not verbose):
-            tokens = par + quest
+            tokens = ["[CLS]"] + par + ["[SEP]"] + quest + ["[SEP]"]
             start, end = span.split(",")
             start, end = int(start), int(end)
             bert_tokens = [self.word2bert_indices[word] for word in tokens]
-            bert_span_start = sum(len(x) for x in bert_tokens[:start])
-            bert_span_end = sum(len(x) for x in bert_tokens[:end])
-            span = (bert_span_start, bert_span_end)
+            bert_span_start = sum(len(x) for x in bert_tokens[:start + 1])
+            bert_span_end = sum(len(x) for x in bert_tokens[:end + 1]) # прибавляем 1, т.к. у нас в начале есть еще токен CLS
+            span = (bert_span_start, bert_span_end) 
             self.x_data.append(sum(bert_tokens, []))
             self.y_data.append(span)
 
@@ -99,44 +99,31 @@ class QADataset(Dataset):
 
 
 def main():
-    word2freq = {}
-    lengths_par = []
-    lengths_que = []
-    par_words = []
-    que_words = []
-
     data = pd.read_csv("sberquad.csv")
+    
+    par_tokens = [i.split() for i in data.paragraph_tokens]
+    que_tokens = [tokenize_text(i) for i in data.question]
+    answer_spans = data.word_answer_span
 
-    for text in tqdm(data.paragraph_tokens):
-        words = text.split()
-        par_words.append(words)
-        lengths_par.append(len(words))
-        for word in words:
-            if word in word2freq:
-                word2freq[word] += 1
-            else:
-                word2freq[word] = 1
+    word2index = {"PAD":0, "[CLS]":1, "[SEP]":2}
 
-    for text in tqdm(data.question):
-        words = tokenize_text(text)
-        que_words.append(words)
-        lengths_que.append(len(words))
-        for word in words:
-            if word in word2freq:
-                word2freq[word] += 1
-            else:
-                word2freq[word] = 1
+    for sent in par_tokens:
+        for token in sent:
+            if token not in word2index:
+                word2index[token] = len(word2index)
 
-    word2index = {"PAD": 0}
+    for que in que_tokens:
+        for token in que:
+            if token not in word2index:
+                word2index[token] = len(word2index)
 
-    for word in word2freq:
-        word2index[word] = len(word2index)
-
-    tokenizer = BertTokenizer.from_pretrained("lm")
-    dataset = QADataset(tokenizer=tokenizer, paragraph_tokens=par_words,
-                        question_tokens=que_words,
-                        answer_spans=data.word_answer_span,
-                        word2index=word2index)
+    tokenizer = BertTokenizer.from_pretrained("lm", do_lower_case=False)
+    
+    dataset = QADataset(tokenizer=tokenizer,
+                   paragraph_tokens=par_tokens,
+                   question_tokens=que_tokens,
+                   answer_spans=answer_spans,
+                   word2index=word2index)
 
 if __name__ == "__main__":
     main()
