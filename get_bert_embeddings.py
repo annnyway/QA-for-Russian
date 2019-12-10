@@ -48,5 +48,7 @@ def embed_data(x_data):
     
     for entry in data_iterator:
         entries.append(get_embeddings(entry, model))
+    
+    entries = torch.stack(entries)
         
-    return entries, model  
+    return entries

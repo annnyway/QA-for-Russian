@@ -14,8 +14,8 @@ class QADataset(Dataset):
                  answer_spans: list,
                  word2index: dict,
                  verbose=True,
-                 sequence_length=384,
-                 pad_token='PAD'):
+                 max_seq_len=512,
+                pad_token="[PAD]"):
 
         super().__init__()
         self.tokenizer = tokenizer
@@ -27,7 +27,7 @@ class QADataset(Dataset):
                    self.word2bert_tokens[word]] for word in
             self.word2bert_tokens.keys()}
 
-        self.sequence_length = sequence_length
+        self.sequence_length = max_seq_len
         self.pad_index = self.word2index[pad_token]
 
         self.x_data = []
@@ -46,7 +46,19 @@ class QADataset(Dataset):
             bert_span_start = sum(len(x) for x in bert_tokens[:start + 1])
             bert_span_end = sum(len(x) for x in bert_tokens[:end + 1]) # прибавляем 1, т.к. у нас в начале есть еще токен CLS
             span = (bert_span_start, bert_span_end) 
-            self.x_data.append(sum(bert_tokens, []))
+            
+            bert_tokens = sum(bert_tokens, [])
+            if len(bert_tokens) > 512:
+                par_tokens = [self.word2bert_indices[word] for word in ["[CLS]"] + par]
+                quest_tokens = [self.word2bert_indices[word] for word in ["[SEP]"] + quest + ["[SEP]"]]
+                if bert_span_start <= len(par_tokens)/2: # если спан в первой половине параграфа
+                    slice_ = len(bert_tokens) - 512
+                    bert_tokens = sum(par_tokens[:-slice_] + quest_tokens, [])
+                elif bert_span_start > len(par_tokens)/2:
+                    slice_ = len(bert_tokens) - 512
+                    bert_tokens = sum(par_tokens[slice_:] + quest_tokens, [])
+                    
+            self.x_data.append(bert_tokens)
             self.y_data.append(span)
 
     def padding(self, sequence):
@@ -69,34 +81,6 @@ class QADataset(Dataset):
         y = torch.Tensor(y).long()
         return x, y
 
-    def get_embeddings(self, text):
-        tokenized_text = self.tokenizer.tokenize(text)
-        indexed_tokens = self.tokenizer.convert_tokens_to_ids(tokenized_text)
-        tokens_tensor = torch.tensor([indexed_tokens])
-        segments_ids = [1] * len(tokenized_text)
-        segments_tensors = torch.tensor([segments_ids])
-        self.model.eval()
-        with torch.no_grad():
-            encoded_layers, _ = self.model.bert(tokens_tensor,
-                                                segments_tensors)
-        token_embeddings = torch.stack(encoded_layers, dim=0)
-        token_embeddings = torch.squeeze(token_embeddings, dim=1)
-        token_embeddings = token_embeddings.permute(1, 0, 2)
-        token_vecs_cat = []
-        for token in token_embeddings:
-            cat_vec = torch.cat((token[-1], token[-2], token[-3], token[-4]),
-                                dim=0)
-            # cat_vec = torch.sum(token[-4:], dim=0)
-            token_vecs_cat.append(cat_vec)
-        return torch.stack(token_vecs_cat, dim=0)
-
-    def embed_data(self, texts: list):
-        entries = []
-        data_iterator = tqdm(texts, desc='Loading embeddings')
-        for entry in data_iterator:
-            entries.append(self.get_embeddings(entry))
-        return entries
-
 
 def main():
     data = pd.read_csv("sberquad.csv")
@@ -105,7 +89,7 @@ def main():
     que_tokens = [tokenize_text(i) for i in data.question]
     answer_spans = data.word_answer_span
 
-    word2index = {"PAD":0, "[CLS]":1, "[SEP]":2}
+    word2index = {"[PAD]":0, "[CLS]":1, "[SEP]":2}
 
     for sent in par_tokens:
         for token in sent:
