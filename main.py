@@ -69,8 +69,9 @@ class QADataset(Dataset):
             if bert_span_start < self.sequence_length:
                 target[bert_span_start] = 1
 
+            assert bert_span_end > 0
             if bert_span_end < self.sequence_length:
-                target[bert_span_end] = 2
+                target[bert_span_end-1] = 2
 
             self.y_data.append(target)
 
