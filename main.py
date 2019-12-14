@@ -1,10 +1,15 @@
+import numpy as np
 import pandas as pd
 import torch
-import numpy as np
-from torch.utils.data import Dataset
+from pytorch_pretrained_bert import BertTokenizer, BertConfig, BertForMaskedLM
+from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
 from transformers import BertTokenizer
+import joblib
+
 from preprocess_dataset import tokenize_text
+
+device = ('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 
 class QADataset(Dataset):
@@ -66,7 +71,7 @@ class QADataset(Dataset):
 
             if bert_span_end < self.sequence_length:
                 target[bert_span_end] = 2
-                
+
             self.y_data.append(target)
 
     def padding(self, sequence):
@@ -90,6 +95,88 @@ class QADataset(Dataset):
         return x, y
 
 
+class Classifier(torch.nn.Module):
+
+    def __init__(self,
+                 hidden_size=3072,
+                 linear_out=3,
+                 batch_first=True):
+
+        super(Classifier, self).__init__()
+
+        self.output_model_file = "lm/pytorch_model.bin"
+        self.output_config_file = "lm/config.json"
+        self.tokenizer = BertTokenizer.from_pretrained("lm",
+                                                       do_lower_case=False)
+        self.config = BertConfig.from_json_file(self.output_config_file)
+        self.model = BertForMaskedLM(self.config)
+        device = ('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.state_dict = torch.load(self.output_model_file,
+                                     map_location=device)
+        self.model.load_state_dict(self.state_dict)
+
+        self.linear = torch.nn.Linear(hidden_size, linear_out)
+
+    def get_embeddings(self, x_instance):
+        indexed_tokens = x_instance.tolist()
+        tokens_tensor = torch.tensor([indexed_tokens])
+        segments_ids = [1] * len(indexed_tokens)
+        segments_tensors = torch.tensor([segments_ids])
+        self.model.eval()
+        with torch.no_grad():
+            encoded_layers, _ = self.model.bert(tokens_tensor,
+                                                segments_tensors)
+        token_embeddings = torch.stack(encoded_layers, dim=0)
+        token_embeddings = torch.squeeze(token_embeddings, dim=1)
+        token_embeddings = token_embeddings.permute(1, 0, 2)
+        token_vecs_cat = []
+        for token in token_embeddings:
+            cat_vec = torch.cat((token[-1], token[-2], token[-3], token[-4]),
+                                dim=0)
+            token_vecs_cat.append(cat_vec)
+        token_vecs_cat = torch.stack(token_vecs_cat, dim=0)
+        return token_vecs_cat
+
+    def embed_data(self, x):
+        entries = []
+        data_iterator = tqdm(x, desc='Loading embeddings')
+        for entry in data_iterator:
+            emb = self.get_embeddings(entry)
+            entries.append(emb)
+        return torch.stack(entries)
+
+    def forward(self, x):
+
+        h = self.embed_data(x)
+        pred = self.linear(h)
+
+        return pred
+
+
+def train_model(model, epochs, train_loader, optimizer, criterion):
+    train_losses = []
+    for n_epoch in range(epochs):
+        progress_bar = tqdm(total=len(train_loader.dataset),
+                            desc='Epoch {}'.format(n_epoch + 1))
+
+        for x, y in train_loader:
+            optimizer.zero_grad()
+            pred = model.forward(x.to(device))
+
+            loss = criterion(pred.to(device).permute(0, 2, 1),
+                             y.long().to(device))
+            loss.backward()
+            optimizer.step()
+
+            train_losses.append(loss.item())
+            progress_bar.set_postfix(loss=np.mean(train_losses[-500:]))
+            progress_bar.update(x.shape[0])
+
+        progress_bar.close()
+        torch.save(model, "classifier.pkl")
+        joblib.dump(train_losses, "train_losses.pkl")
+    return train_losses
+
 def main():
     data = pd.read_csv("sberquad.csv")
     
@@ -110,12 +197,51 @@ def main():
                 word2index[token] = len(word2index)
 
     tokenizer = BertTokenizer.from_pretrained("lm", do_lower_case=False)
-    
-    dataset = QADataset(tokenizer=tokenizer,
-                   paragraph_tokens=par_tokens,
-                   question_tokens=que_tokens,
-                   answer_spans=answer_spans,
-                   word2index=word2index)
+
+    from sklearn.model_selection import train_test_split
+
+    train, test = train_test_split(data, test_size=0.2)
+    train = train.reset_index(drop=True)
+    test = test.reset_index(drop=True)
+
+    par_tokens_test = [i.split() for i in test.paragraph_tokens]
+    que_tokens_test = [tokenize_text(i) for i in test.question]
+    answer_spans_test = test.word_answer_span
+
+    par_tokens_train = [i.split() for i in train.paragraph_tokens]
+    que_tokens_train = [tokenize_text(i) for i in train.question]
+    answer_spans_train = train.word_answer_span
+
+    train_data = QADataset(tokenizer=tokenizer,
+                           paragraph_tokens=par_tokens_train,
+                           question_tokens=que_tokens_train,
+                           answer_spans=answer_spans_train,
+                           word2index=word2index)
+
+    test_data = QADataset(tokenizer=tokenizer,
+                          paragraph_tokens=par_tokens_test,
+                          question_tokens=que_tokens_test,
+                          answer_spans=answer_spans_test,
+                          word2index=word2index)
+
+    train_loader = DataLoader(train_data, batch_size=32, drop_last=True)
+    test_loader = DataLoader(test_data, batch_size=32, drop_last=True)
+
+    epochs = 5
+
+    device = ('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+    model = Classifier()
+    criterion = torch.nn.CrossEntropyLoss().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=8e-6,
+                                 weight_decay=0.01)
+
+    print("Training the model...")
+    train_losses = train_model(model=model, epochs=epochs, optimizer=optimizer,
+                         criterion=criterion, train_loader=train_loader)
+    joblib.dump(train_losses, "train_losses.pkl")
+    torch.save(model, "classifier.pkl")
+
 
 if __name__ == "__main__":
     main()
