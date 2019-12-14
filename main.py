@@ -1,5 +1,6 @@
 import pandas as pd
 import torch
+import numpy as np
 from torch.utils.data import Dataset
 from tqdm.auto import tqdm
 from transformers import BertTokenizer
@@ -59,7 +60,14 @@ class QADataset(Dataset):
                     bert_tokens = sum(par_tokens[slice_:] + quest_tokens, [])
                     
             self.x_data.append(bert_tokens)
-            self.y_data.append(span)
+            target = [0] * self.sequence_length
+            if bert_span_start < self.sequence_length:
+                target[bert_span_start] = 1
+
+            if bert_span_end < self.sequence_length:
+                target[bert_span_end] = 2
+                
+            self.y_data.append(target)
 
     def padding(self, sequence):
         if len(sequence) > self.sequence_length:
