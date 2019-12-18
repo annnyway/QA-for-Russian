@@ -214,14 +214,14 @@ def main():
 
     tokenizer = BertTokenizer.from_pretrained("lm", do_lower_case=False)
 
-    # from sklearn.model_selection import train_test_split
+    from sklearn.model_selection import train_test_split
 
-    # train, test = train_test_split(data, test_size=0.2)
-    # train = train.reset_index(drop=True)
-    # test = test.reset_index(drop=True)
+    train, test = train_test_split(data, test_size=0.2, random_state=42)
+    train = train.reset_index(drop=True)
+    test = test.reset_index(drop=True)
     
-    test = pd.read_csv("test.csv")
-    train = pd.read_csv("train.csv")
+    # test = pd.read_csv("test.csv")
+    # train = pd.read_csv("train.csv")
 
     par_tokens_test = [i.split() for i in test.paragraph_tokens]
     que_tokens_test = [tokenize_text(i) for i in test.question]
