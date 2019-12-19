@@ -65,13 +65,13 @@ class QADataset(Dataset):
                     bert_tokens = sum(par_tokens[slice_:] + quest_tokens, [])
                     
             self.x_data.append(bert_tokens)
-            target = [0] * self.sequence_length
+            target = [-1] * self.sequence_length
             if bert_span_start < self.sequence_length:
-                target[bert_span_start] = 1
+                target[bert_span_start] = 0
 
             assert bert_span_end > 0
             if bert_span_end < self.sequence_length:
-                target[bert_span_end-1] = 2
+                target[bert_span_end-1] = 1
 
             self.y_data.append(target)
 
@@ -115,8 +115,8 @@ class Classifier(torch.nn.Module):
         self.state_dict = torch.load(self.output_model_file,
                                      map_location=device)
         self.model.load_state_dict(self.state_dict)
-
-        self.linear = torch.nn.Linear(hidden_size, linear_out)
+        self.lstm = torch.nn.LSTM(hidden_size, 128)
+        self.linear = torch.nn.Linear(128, linear_out)
 
     def get_embeddings(self, x_instance):
         indexed_tokens = x_instance.tolist()
@@ -149,6 +149,7 @@ class Classifier(torch.nn.Module):
     def forward(self, x):
 
         h = self.embed_data(x)
+        h, _ = self.lstm(h)
         pred = self.linear(h)
 
         return pred
@@ -180,7 +181,7 @@ def train_model(model, epochs, train_loader, optimizer, criterion):
 
 def main():
     data = pd.read_csv("sberquad.csv")
-    
+
     par_tokens = [i.split() for i in data.paragraph_tokens]
     que_tokens = [tokenize_text(i) for i in data.question]
     answer_spans = data.word_answer_span
@@ -233,7 +234,7 @@ def main():
     device = ('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
     model = Classifier()
-    criterion = torch.nn.CrossEntropyLoss().to(device)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=-1).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=8e-6,
                                  weight_decay=0.01)
 
