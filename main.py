@@ -9,7 +9,7 @@ import joblib
 
 from preprocess_dataset import tokenize_text
 
-device = ('cuda') if torch.cuda.is_available() else torch.device('cpu')
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 
 class QADataset(Dataset):
@@ -37,9 +37,8 @@ class QADataset(Dataset):
         self.pad_index = self.word2index[pad_token]
 
         self.x_data = []
-        # self.load_x(paragraph_tokens, question_tokens, verbose=verbose)
         self.y_data = []
-        # self.load_y(answer_spans)
+        self.bert_spans = []
         self.load_x_y(paragraph_tokens, question_tokens, answer_spans)
 
     def load_x_y(self, paragraphs, questions, spans, verbose=True):
@@ -62,18 +61,29 @@ class QADataset(Dataset):
                     bert_tokens = sum(par_tokens[:-slice_] + quest_tokens, [])
                 elif bert_span_start > len(par_tokens)/2:
                     slice_ = len(bert_tokens) - 512
-                    bert_tokens = sum(par_tokens[slice_:] + quest_tokens, [])
-                    
-            self.x_data.append(bert_tokens)
+                    if slice_ > self.sequence_length:
+                        bert_tokens = sum(par_tokens[slice_:-slice_] + quest_tokens, [])
+                        bert_span_start = bert_span_start - slice_ 
+                        bert_span_end = bert_span_end - slice_
+                    else:
+                        slice_ = len(bert_tokens) - 512
+                        bert_span_start = bert_span_start - slice_ 
+                        bert_span_end = bert_span_end - slice_
+                        bert_tokens = sum(par_tokens[slice_:] + quest_tokens, [])
+            
+            bert_span = (bert_span_start, bert_span_end-1)
+            
             target = [-1] * self.sequence_length
             if bert_span_start < self.sequence_length:
                 target[bert_span_start] = 0
 
-            assert bert_span_end > 0
+            # assert bert_span_end > 0
             if bert_span_end < self.sequence_length:
                 target[bert_span_end-1] = 1
-
+                
+            self.x_data.append(bert_tokens)
             self.y_data.append(target)
+            self.bert_spans.append(bert_span)
 
     def padding(self, sequence):
         if len(sequence) > self.sequence_length:
@@ -93,31 +103,33 @@ class QADataset(Dataset):
         x = torch.Tensor(x).long()
         y = self.y_data[idx]
         y = torch.Tensor(y).long()
-        return x, y
+        bert_span = self.bert_spans[idx]
+        bert_span = torch.Tensor(bert_span).long()
 
+
+        return x, y, bert_span
 
 class Classifier(torch.nn.Module):
-
-    def __init__(self,
-                 hidden_size=3072,
-                 linear_out=3,
-                 batch_first=True):
-
+    
+    def __init__(self, 
+               hidden_size=3072,  
+               linear_out=2,
+               batch_first=True):
+  
         super(Classifier, self).__init__()
-
+            
         self.output_model_file = "lm/pytorch_model.bin"
         self.output_config_file = "lm/config.json"
-        self.tokenizer = BertTokenizer.from_pretrained("lm",
-                                                       do_lower_case=False)
+        self.tokenizer = BertTokenizer.from_pretrained("lm", do_lower_case=False)
         self.config = BertConfig.from_json_file(self.output_config_file)
         self.model = BertForMaskedLM(self.config)
-        device = ('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        self.state_dict = torch.load(self.output_model_file,
-                                     map_location=device)
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.state_dict = torch.load(self.output_model_file, map_location=device)
         self.model.load_state_dict(self.state_dict)
-        self.lstm = torch.nn.LSTM(hidden_size, 128)
-        self.linear = torch.nn.Linear(128, linear_out)
-
+        self.lstm = torch.nn.LSTM(hidden_size, 300)
+        self.linear = torch.nn.Linear(300, linear_out)
+        
+    
     def get_embeddings(self, x_instance):
         indexed_tokens = x_instance.tolist()
         tokens_tensor = torch.tensor([indexed_tokens])
@@ -126,7 +138,7 @@ class Classifier(torch.nn.Module):
         self.model.eval()
         with torch.no_grad():
             encoded_layers, _ = self.model.bert(tokens_tensor,
-                                                segments_tensors)
+                                       segments_tensors)
         token_embeddings = torch.stack(encoded_layers, dim=0)
         token_embeddings = torch.squeeze(token_embeddings, dim=1)
         token_embeddings = token_embeddings.permute(1, 0, 2)
@@ -138,20 +150,23 @@ class Classifier(torch.nn.Module):
         token_vecs_cat = torch.stack(token_vecs_cat, dim=0)
         return token_vecs_cat
 
-    def embed_data(self, x):
-        entries = []
-        data_iterator = tqdm(x, desc='Loading embeddings')
+    
+    def embed_data(self, x): 
+        entries = [] 
+        data_iterator = tqdm(x, desc='Loading embeddings')    
         for entry in data_iterator:
             emb = self.get_embeddings(entry)
             entries.append(emb)
         return torch.stack(entries)
-
+    
+        
     def forward(self, x):
 
         h = self.embed_data(x)
-        h, _ = self.lstm(h)
-        pred = self.linear(h)
-
+        h = h.permute(1, 0, 2)
+        output, _ = self.lstm(h)
+        pred = self.linear(output)
+        pred = pred.permute(1, 0, 2)
         return pred
 
 
@@ -161,7 +176,7 @@ def train_model(model, epochs, train_loader, optimizer, criterion):
         progress_bar = tqdm(total=len(train_loader.dataset),
                             desc='Epoch {}'.format(n_epoch + 1))
 
-        for x, y in train_loader:
+        for x, y, bert_span in train_loader:
             optimizer.zero_grad()
             pred = model.forward(x.to(device))
 
@@ -175,9 +190,10 @@ def train_model(model, epochs, train_loader, optimizer, criterion):
             progress_bar.update(x.shape[0])
 
         progress_bar.close()
-        torch.save(model, "classifier.pkl")
+        torch.save(model, "classifier-" + str(n_epoch) + ".pkl")
         joblib.dump(train_losses, "train_losses.pkl")
     return train_losses
+
 
 def main():
     data = pd.read_csv("sberquad.csv")
@@ -202,9 +218,12 @@ def main():
 
     from sklearn.model_selection import train_test_split
 
-    train, test = train_test_split(data, test_size=0.2)
+    train, test = train_test_split(data, test_size=0.2, random_state=42)
     train = train.reset_index(drop=True)
     test = test.reset_index(drop=True)
+
+    # test = pd.read_csv("test.csv")
+    # train = pd.read_csv("train.csv")
 
     par_tokens_test = [i.split() for i in test.paragraph_tokens]
     que_tokens_test = [tokenize_text(i) for i in test.question]
@@ -231,18 +250,17 @@ def main():
 
     epochs = 5
 
-    device = ('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    device = torch.device('cuda') # if torch.cuda.is_available() else torch.device('cpu')
 
     model = Classifier()
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-1).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=8e-6,
+    optimizer = torch.optim.Adam(model.parameters(), lr=8e-5,
                                  weight_decay=0.01)
 
     print("Training the model...")
     train_losses = train_model(model=model, epochs=epochs, optimizer=optimizer,
                          criterion=criterion, train_loader=train_loader)
     joblib.dump(train_losses, "train_losses.pkl")
-    torch.save(model, "classifier.pkl")
 
 
 if __name__ == "__main__":
