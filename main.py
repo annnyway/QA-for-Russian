@@ -112,7 +112,7 @@ class QADataset(Dataset):
 class Classifier(torch.nn.Module):
     
     def __init__(self, 
-               hidden_size=3072,  
+               hidden_size=768,
                linear_out=2,
                batch_first=True):
   
@@ -144,9 +144,9 @@ class Classifier(torch.nn.Module):
         token_embeddings = token_embeddings.permute(1, 0, 2)
         token_vecs_cat = []
         for token in token_embeddings:
-            cat_vec = torch.cat((token[-1], token[-2], token[-3], token[-4]),
-                                dim=0)
-            token_vecs_cat.append(cat_vec)
+            cat_vec = torch.stack((token[-1], token[-2], token[-3], token[-4]))
+            mean_vec = torch.mean(cat_vec, 0)
+            token_vecs_cat.append(mean_vec)
         token_vecs_cat = torch.stack(token_vecs_cat, dim=0)
         return token_vecs_cat
 
@@ -197,6 +197,15 @@ def train_model(model, epochs, train_loader, optimizer, criterion):
 
 def main():
     data = pd.read_csv("sberquad.csv")
+
+    data['span_len'] = data.apply(
+        lambda row: int(row.word_answer_span.split(",")[1]) - int(
+            row.word_answer_span.split(",")[0]), axis=1)
+    data['span_avg'] = data.apply(lambda row: (int(
+        row.word_answer_span.split(",")[1]) + int(
+        row.word_answer_span.split(",")[0])) / 2, axis=1)
+
+    data = data[(data.span_len <= 10) & (data.span_avg <= 150)]
 
     par_tokens = [i.split() for i in data.paragraph_tokens]
     que_tokens = [tokenize_text(i) for i in data.question]
