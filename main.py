@@ -133,8 +133,10 @@ class Classifier(torch.nn.Module):
     
     def get_embeddings(self, x_instance):
         indexed_tokens = x_instance.tolist()
+        break_sentence = indexed_tokens.index(102)
         tokens_tensor = torch.tensor([indexed_tokens])
-        segments_ids = [1] * len(indexed_tokens)
+        segments_ids = [0] * (break_sentence+1)
+        segments_ids += [1] * (len(indexed_tokens) - break_sentence - 1)
         segments_tensors = torch.tensor([segments_ids])
         self.model.eval()
         with torch.no_grad():
