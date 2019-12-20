@@ -6,6 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
 from transformers import BertTokenizer
 import joblib
+from sklearn import metrics
 
 from preprocess_dataset import tokenize_text
 
@@ -169,8 +170,9 @@ class Classifier(torch.nn.Module):
         return pred
 
 
-def train_model(model, epochs, train_loader, optimizer, criterion):
+def train_model(model, epochs, train_loader, dev_loader, optimizer, criterion):
     train_losses = []
+    dev_losses = []
     for n_epoch in range(epochs):
         progress_bar = tqdm(total=len(train_loader.dataset),
                             desc='Epoch {}'.format(n_epoch + 1))
@@ -189,6 +191,20 @@ def train_model(model, epochs, train_loader, optimizer, criterion):
             progress_bar.update(x.shape[0])
         
         progress_bar.close()
+            
+        with torch.no_grad():
+            progress_bar = tqdm(total=len(dev_loader.dataset), desc='Validation')
+            for x, y, bert_span in dev_loader:
+                pred = model.forward(x.to(device))
+                loss = criterion(pred.to(device).permute(0, 2, 1),
+                             y.long().to(device))
+                spanlist.append(torch.argmax(pred, dim=1).tolist())
+                predictedlist.append(y.tolist())
+
+                dev_losses.append(loss.item())
+                progress_bar.set_postfix(loss=np.mean(dev_losses[-500:]))
+                progress_bar.update(x.shape[0])
+        print(metrics.classification_report(spanlist, predictedlist, digits=2))
 
         torch.save(model, "classifier-" + str(n_epoch+1) + ".pkl")
         joblib.dump(train_losses, "train_losses.pkl")
@@ -201,7 +217,7 @@ def train_model(model, epochs, train_loader, optimizer, criterion):
         #    }, 
         #    "/content/drive/My Drive/colab/classifier_state_dict" + str(n_epoch+1) + ".pkl")
         
-    return train_losses
+    return train_losses, dev_losses
 
 
 def main():
@@ -236,20 +252,23 @@ def main():
 
     from sklearn.model_selection import train_test_split
 
-    train, test = train_test_split(data, test_size=0.2, random_state=42)
+    train, temp = train_test_split(data, test_size=0.3, random_state=42)
+    dev, test = train_test_split(temp, test_size=0.5, random_state=42)
     train = train.reset_index(drop=True)
     test = test.reset_index(drop=True)
+    dev = dev.reset_index(drop=True)
 
-    # test = pd.read_csv("test.csv")
-    # train = pd.read_csv("train.csv")
+    par_tokens_train = [i.split() for i in train.paragraph_tokens]
+    que_tokens_train = [tokenize_text(i) for i in train.question]
+    answer_spans_train = train.word_answer_span
 
     par_tokens_test = [i.split() for i in test.paragraph_tokens]
     que_tokens_test = [tokenize_text(i) for i in test.question]
     answer_spans_test = test.word_answer_span
 
-    par_tokens_train = [i.split() for i in train.paragraph_tokens]
-    que_tokens_train = [tokenize_text(i) for i in train.question]
-    answer_spans_train = train.word_answer_span
+    par_tokens_dev = [i.split() for i in dev.paragraph_tokens]
+    que_tokens_dev = [tokenize_text(i) for i in dev.question]
+    answer_spans_dev = dev.word_answer_span
 
     train_data = QADataset(tokenizer=tokenizer,
                            paragraph_tokens=par_tokens_train,
@@ -262,9 +281,16 @@ def main():
                           question_tokens=que_tokens_test,
                           answer_spans=answer_spans_test,
                           word2index=word2index)
+    
+    dev_data = QADataset(tokenizer=tokenizer,
+                   paragraph_tokens=par_tokens_dev,
+                   question_tokens=que_tokens_dev,
+                   answer_spans=answer_spans_dev,
+                   word2index=word2index)
 
     train_loader = DataLoader(train_data, batch_size=32, drop_last=True)
     test_loader = DataLoader(test_data, batch_size=32, drop_last=True)
+    dev_loader = DataLoader(dev_data, batch_size=32, drop_last=True)
 
     epochs = 5
 
@@ -277,7 +303,7 @@ def main():
 
     print("Training the model...")
     train_losses = train_model(model=model, epochs=epochs, optimizer=optimizer,
-                         criterion=criterion, train_loader=train_loader)
+                         criterion=criterion, train_loader=train_loader, dev_loader=dev_loader)
 
 
 if __name__ == "__main__":
