@@ -137,8 +137,8 @@ class Classifier(torch.nn.Module):
         segments_tensors = torch.tensor([segments_ids])
         self.model.eval()
         with torch.no_grad():
-            encoded_layers, _ = self.model.bert(tokens_tensor,
-                                       segments_tensors)
+            encoded_layers, _ = self.model.bert(tokens_tensor.to(device),
+                                       segments_tensors.to(device))
         token_embeddings = torch.stack(encoded_layers, dim=0)
         token_embeddings = torch.squeeze(token_embeddings, dim=1)
         token_embeddings = token_embeddings.permute(1, 0, 2)
@@ -153,9 +153,8 @@ class Classifier(torch.nn.Module):
     
     def embed_data(self, x): 
         entries = [] 
-        data_iterator = tqdm(x, desc='Loading embeddings')    
-        for entry in data_iterator:
-            emb = self.get_embeddings(entry)
+        for entry in x:
+            emb = self.get_embeddings(entry.to(device)).to(device)
             entries.append(emb)
         return torch.stack(entries)
     
@@ -188,10 +187,20 @@ def train_model(model, epochs, train_loader, optimizer, criterion):
             train_losses.append(loss.item())
             progress_bar.set_postfix(loss=np.mean(train_losses[-500:]))
             progress_bar.update(x.shape[0])
-
+        
         progress_bar.close()
-        torch.save(model, "classifier-" + str(n_epoch) + ".pkl")
+
+        torch.save(model, "classifier-" + str(n_epoch+1) + ".pkl")
         joblib.dump(train_losses, "train_losses.pkl")
+
+        # torch.save({
+        #    'epoch': n_epoch+1,
+        #     'model_state_dict': model.state_dict,
+        #    'optimizer_state_dict': optimizer.state_dict,
+        #    'loss': train_losses,
+        #    }, 
+        #    "/content/drive/My Drive/colab/classifier_state_dict" + str(n_epoch+1) + ".pkl")
+        
     return train_losses
 
 
@@ -261,15 +270,14 @@ def main():
 
     device = torch.device('cuda') # if torch.cuda.is_available() else torch.device('cpu')
 
-    model = Classifier()
+    model = Classifier().to(device)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-1).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=8e-5,
+    optimizer = torch.optim.Adam(model.parameters(), lr=8e-6,
                                  weight_decay=0.01)
 
     print("Training the model...")
     train_losses = train_model(model=model, epochs=epochs, optimizer=optimizer,
                          criterion=criterion, train_loader=train_loader)
-    joblib.dump(train_losses, "train_losses.pkl")
 
 
 if __name__ == "__main__":
